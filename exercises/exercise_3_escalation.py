@@ -44,6 +44,8 @@ def node_analyze(state):
         analysis = llm.invoke([
             {"role": "system", "content": (
                 "Senior reviewer. Structured output. "
+                "If confidence is below 58%, populate escalation_questions with "
+                "2-4 specific questions that reference the diff."
                 # TODO: add an instruction: if confidence < 60%, populate escalation_questions
                 # with 2–4 specific, context-rich questions (reference which file/section in the diff).
             )},
@@ -75,7 +77,12 @@ def node_escalate(state: ReviewState) -> dict:
     #       pr_url, confidence, confidence_reasoning, summary, risk_factors, questions.
     # answers = interrupt({...})
     # return {"escalation_answers": answers}
-    raise NotImplementedError("Call interrupt() with an escalation payload")
+    answers = interrupt({
+        "kind": "escalation", "pr_url": state["pr_url"], "confidence": a.confidence,
+        "confidence_reasoning": a.confidence_reasoning, "summary": a.summary,
+        "risk_factors": a.risk_factors, "questions": questions,
+    })
+    return {"escalation_answers": answers}
 
 
 def node_synthesize(state: ReviewState) -> dict:
@@ -86,7 +93,16 @@ def node_synthesize(state: ReviewState) -> dict:
     #     containing the original diff + initial analysis + Q&A.
     #   - return {"analysis": refined}
     # `node_commit` will then post the refined review to the PR.
-    raise NotImplementedError("Synthesize a refined PRAnalysis using the reviewer answers")
+    qa = "\n".join(
+        f"Q: {question}\nA: {answer}"
+        for question, answer in state.get("escalation_answers", {}).items()
+    )
+    llm = get_llm().with_structured_output(PRAnalysis)
+    refined = llm.invoke([
+        {"role": "system", "content": "Refine the review using reviewer answers. Return structured output."},
+        {"role": "user", "content": f"Diff:\n{state['pr_diff']}\n\nReviewer Q&A:\n{qa}"},
+    ])
+    return {"analysis": refined}
 
 
 def node_human_approval(state):
@@ -162,6 +178,8 @@ def build_graph():
     g.add_edge("human_approval", "commit")
     g.add_edge("commit", END)
     # TODO: wire escalate → synthesize → commit  (commit already → END)
+    g.add_edge("escalate", "synthesize")
+    g.add_edge("synthesize", "commit")
     return g.compile(checkpointer=MemorySaver())
 
 
